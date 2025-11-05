@@ -380,12 +380,10 @@ def create_price_checker(monitored_dict):
         except Exception:
             prices, ema10, ema20, rsi_values = [], [], [], []
 
-        # --- Trend analizi ---
         if len(prices) >= 4 and len(ema10) > 0 and len(ema20) > 0:
             ema_diff = ema10[-1] - ema20[-1]
             rsi_last = rsi_values[-1] if len(rsi_values) > 0 else rsi
 
-            # RSI yönü
             if rsi_last > 60:
                 rsi_signal = "yukarı"
             elif rsi_last < 40:
@@ -393,7 +391,6 @@ def create_price_checker(monitored_dict):
             else:
                 rsi_signal = "nötr"
 
-            # Son 3 mum yönü (momentum)
             momentum_seq = np.sign(np.diff(prices[-4:])).tolist()
             consistency = sum(momentum_seq)
 
@@ -401,7 +398,6 @@ def create_price_checker(monitored_dict):
             if prev_data and symbol in prev_data:
                 prev_trend = prev_data[symbol].get("trend")
 
-            # Trend belirleme
             if consistency >= 2 and ema_diff > 0 and rsi_signal == "yukarı":
                 trend_label = "📈 Güçlü yükseliş"
             elif consistency <= -2 and ema_diff < 0 and rsi_signal == "aşağı":
@@ -415,29 +411,30 @@ def create_price_checker(monitored_dict):
         else:
             trend_label = "⏸ Kararsız"
 
-        # --- Tavsiye oluştur ---
+        # --- Tavsiyeler (dict olarak döner) ---
         if "yükseliş" in trend_label:
-            advice_pair = (
-                "Trend güçleniyor. Elindeyse pozisyonu koru, yeni giriş için küçük düzeltmeleri bekle.",
-                "Momentum olumlu, ancak RSI aşırıya kaçarsa kâr alımı düşünülebilir."
-            )
+            advice_pair = {
+                "own": "Trend güçleniyor. Elindeyse pozisyonu koru, yeni giriş için küçük düzeltmeleri bekle.",
+                "no_own": "Momentum olumlu, ancak RSI aşırıya kaçarsa kâr alımı düşünülebilir."
+            }
         elif "düşüş" in trend_label:
-            advice_pair = (
-                "Trend düşüşte. Elindeyse stop koy, yoksa yeni pozisyon için dip dönüş sinyali bekle.",
-                "RSI düşük bölgede. Hacim toparlanırsa tepki alımı gelebilir."
-            )
+            advice_pair = {
+                "own": "Trend düşüşte. Elindeyse stop koy, yoksa yeni pozisyon için dip dönüş sinyali bekle.",
+                "no_own": "RSI düşük bölgede. Hacim toparlanırsa tepki alımı gelebilir."
+            }
         elif "zayıflayan" in trend_label:
-            advice_pair = (
-                "Momentum ve hacim zayıflıyor, kârı korumak için stop belirle.",
-                "Trend kararsız. RSI 40–60 aralığında, yön teyidi beklenmeli."
-            )
+            advice_pair = {
+                "own": "Momentum ve hacim zayıflıyor, kârı korumak için stop belirle.",
+                "no_own": "Trend kararsız. RSI 40–60 aralığında, yön teyidi beklenmeli."
+            }
         else:
-            advice_pair = (
-                "Piyasa kararsız. Yeni işlem açmadan önce hacim desteğini bekle.",
-                "Henüz net sinyal yok. RSI ve hacim yön değişimini gösterebilir."
-            )
+            advice_pair = {
+                "own": "Piyasa kararsız. Yeni işlem açmadan önce hacim desteğini bekle.",
+                "no_own": "Henüz net sinyal yok. RSI ve hacim yön değişimini gösterebilir."
+            }
 
         return trend_label, advice_pair
+
     def check_prices():
         tz = pytz.timezone(MARKET_TZ)
         now = datetime.now(tz)

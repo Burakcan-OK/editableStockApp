@@ -367,58 +367,77 @@ def create_price_checker(monitored_dict):
             print(f"⚠️ {symbol} trend datası alınamadı:", e)
             return None
 
-    def analyze_trend(symbol: str, price: float, base_price: float, rsi: float, fibo_crossed: list, momentum: float, obv_slope: float ):
-        price_change_pct = ((price - base_price) / base_price) * 100
-        fibo_strength = 0
-        if any(lvl in [23.6, 38.2] for lvl in fibo_crossed):
-            fibo_strength += 1
-        if any(lvl in [50.0, 61.8] for lvl in fibo_crossed):
-            fibo_strength += 2
-        if any(lvl in [78.6, 100.0] for lvl in fibo_crossed):
-            fibo_strength += 3
+    def analyze_trend(symbol, price, base, rsi, fibo_crossed, momentum, obv_slope=None, prev_data=None):
+        """
+        Daha istikrarlı trend belirleme fonksiyonu.
+        RSI, EMA farkı, hacim (OBV), ve son 3 mum yönünü birlikte değerlendirir.
+        """
+        try:
+            prices = base.get("recent_prices", [])
+            ema10 = base.get("ema10_series", [])
+            ema20 = base.get("ema20_series", [])
+            rsi_values = base.get("rsi_series", [])
+        except Exception:
+            prices, ema10, ema20, rsi_values = [], [], [], []
 
-        # OBV etkisi: hacim yükseliyorsa momentum destekleniyor
-        volume_trend = "artıyor" if obv_slope > 0 else "azalıyor"
-        volume_bias = 1 if obv_slope > 0 else -1
+        # --- Trend analizi ---
+        if len(prices) >= 4 and len(ema10) > 0 and len(ema20) > 0:
+            ema_diff = ema10[-1] - ema20[-1]
+            rsi_last = rsi_values[-1] if len(rsi_values) > 0 else rsi
 
-        # --- Trend kararları ---
-        if price_change_pct > 3 and (momentum > 0 or fibo_strength >= 2) and rsi > 55 and volume_bias > 0:
-            trend = "🚀 Güçlü yükseliş trendi"
-            advice = {
-                "own": "Trend güçleniyor. Hacim de destekliyor, pozisyon korunabilir.",
-                "no_own": "Güçlü trend, hacim artışı teyit ediyor. Kademeli giriş düşünülebilir."
-            }
+            # RSI yönü
+            if rsi_last > 60:
+                rsi_signal = "yukarı"
+            elif rsi_last < 40:
+                rsi_signal = "aşağı"
+            else:
+                rsi_signal = "nötr"
 
-        elif 0 < price_change_pct <= 3 and fibo_strength >= 1 and 45 < rsi < 65:
-            trend = "📈 Kademeli yükseliş trendi"
-            advice = {
-                "own": "Pozisyon korunabilir, RSI dengede. Küçük ek alımlar hacimle desteklenirse mantıklı.",
-                "no_own": "Trend pozitif ama temkinli. Hacim zayıfsa düzeltmeyi bekle."
-            }
+            # Son 3 mum yönü (momentum)
+            momentum_seq = np.sign(np.diff(prices[-4:])).tolist()
+            consistency = sum(momentum_seq)
 
-        elif price_change_pct < -2 and (momentum < 0 or rsi < 40 or volume_bias < 0):
-            trend = "📉 Düşüş trendi"
-            advice = {
-                "own": "Zayıf seyir ve hacim düşüyor. Stop-loss seviyeni sıkı tut veya pozisyonu azalt.",
-                "no_own": "Henüz giriş sinyali yok. RSI 40 altına indikçe fırsat oluşabilir."
-            }
+            prev_trend = None
+            if prev_data and symbol in prev_data:
+                prev_trend = prev_data[symbol].get("trend")
 
-        elif abs(price_change_pct) <= 1 and fibo_strength == 0:
-            trend = "⏸ Yatay/kararsız trend"
-            advice = {
-                "own": "Piyasa kararsız. Yeni işlem açmadan önce hacim desteğini bekle.",
-                "no_own": "Henüz net sinyal yok. RSI ve hacim yön değişimini gösterebilir."
-            }
-
+            # Trend belirleme
+            if consistency >= 2 and ema_diff > 0 and rsi_signal == "yukarı":
+                trend_label = "📈 Güçlü yükseliş"
+            elif consistency <= -2 and ema_diff < 0 and rsi_signal == "aşağı":
+                trend_label = "📉 Güçlü düşüş"
+            elif prev_trend in ["📈 Güçlü yükseliş", "📉 Güçlü düşüş"]:
+                trend_label = prev_trend
+            elif rsi_signal == "nötr":
+                trend_label = "⏸ Kararsız"
+            else:
+                trend_label = "⚠️ Zayıflayan trend"
         else:
-            trend = "⚠️ Zayıflayan trend"
-            advice = {
-                "own": "Momentum ve hacim zayıflıyor, kârı korumak için stop belirle.",
-                "no_own": "Trend kararsız. Fibo 38.2–61.8 destek bölgesine geri dönüşü bekle."
-            }
+            trend_label = "⏸ Kararsız"
 
-        return trend, advice
+        # --- Tavsiye oluştur ---
+        if "yükseliş" in trend_label:
+            advice_pair = (
+                "Trend güçleniyor. Elindeyse pozisyonu koru, yeni giriş için küçük düzeltmeleri bekle.",
+                "Momentum olumlu, ancak RSI aşırıya kaçarsa kâr alımı düşünülebilir."
+            )
+        elif "düşüş" in trend_label:
+            advice_pair = (
+                "Trend düşüşte. Elindeyse stop koy, yoksa yeni pozisyon için dip dönüş sinyali bekle.",
+                "RSI düşük bölgede. Hacim toparlanırsa tepki alımı gelebilir."
+            )
+        elif "zayıflayan" in trend_label:
+            advice_pair = (
+                "Momentum ve hacim zayıflıyor, kârı korumak için stop belirle.",
+                "Trend kararsız. RSI 40–60 aralığında, yön teyidi beklenmeli."
+            )
+        else:
+            advice_pair = (
+                "Piyasa kararsız. Yeni işlem açmadan önce hacim desteğini bekle.",
+                "Henüz net sinyal yok. RSI ve hacim yön değişimini gösterebilir."
+            )
 
+        return trend_label, advice_pair
     def check_prices():
         tz = pytz.timezone(MARKET_TZ)
         now = datetime.now(tz)

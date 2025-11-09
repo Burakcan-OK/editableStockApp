@@ -54,13 +54,6 @@ TOP_N = int(os.environ.get("TOP_N", 5))
 COLUMNS_JSON = os.environ.get("COLUMNS_JSON", "columns.json")
 DATA_JSON = os.environ.get("DATA_JSON", "data.json")
 
-# Kullanıcı bilgilendirmesi
-print("CONFIG:")
-print(f"  CHECK_INTERVAL_MINUTES = {CHECK_INTERVAL_MINUTES} minutes")
-print(f"  USE_MARKET_HOURS = {USE_MARKET_HOURS}")
-print(f"  MARKET HOURS = {MARKET_OPEN} -> {MARKET_CLOSE} ({MARKET_TZ})")
-print(f"  Columns file = {COLUMNS_JSON}, Data file = {DATA_JSON}")
-print("--------------------------------------------------\n")
 
 
 # -----------------------------

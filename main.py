@@ -317,24 +317,26 @@ def analyze_once():
 
 def create_price_checker(monitored_dict):
     # --- Trend verilerini saklayacak önbellek ---
-    trend_cache = {}
+    trend_cache = {}  # örnek: { "ASELS": {"timestamp": datetime, "rsi": 63, "ema10": ..., "ema20": ..., "macd": ..., "obv": ..., "obv_slope": ...} }
 
     def get_trend_data(symbol):
         """Trend göstergelerini getirir, 10 dakikada bir yeniler."""
         now = datetime.now()
         cache = trend_cache.get(symbol)
-        if cache and (now - cache["timestamp"]).seconds < 600:
+        if cache and (now - cache["timestamp"]).seconds < 600:  # 10 dakika
             return cache
 
         try:
-            t = yf.Ticker(f"{symbol}.IS")
+            ticker_symbol = f"{symbol}.IS"
+            t = yf.Ticker(ticker_symbol)
+            # günlük 1 aylık veriyi alıyoruz (günlük baz)
             data = t.history(period="1mo", interval="1d")
             if data is None or data.empty:
                 return None
 
             # EMA, RSI, MACD, OBV hesapla
-            data["EMA10"] = data["Close"].ewm(span=10).mean()
-            data["EMA20"] = data["Close"].ewm(span=20).mean()
+            data["EMA10"] = data["Close"].ewm(span=10, adjust=False).mean()
+            data["EMA20"] = data["Close"].ewm(span=20, adjust=False).mean()
             delta = data["Close"].diff()
             gain = delta.clip(lower=0)
             loss = -delta.clip(upper=0)
@@ -342,24 +344,32 @@ def create_price_checker(monitored_dict):
             avg_loss = loss.rolling(14).mean()
             rs = avg_gain / avg_loss
             data["RSI"] = 100 - (100 / (1 + rs))
-            data["MACD"] = data["Close"].ewm(span=12).mean() - data["Close"].ewm(span=26).mean()
+            data["MACD"] = data["Close"].ewm(span=12, adjust=False).mean() - data["Close"].ewm(span=26, adjust=False).mean()
+            # OBV
             data["OBV"] = (np.sign(data["Close"].diff()) * data["Volume"]).fillna(0).cumsum()
 
-            # OBV eğilimi (son 5 günün eğimi)
-            if len(data["OBV"]) > 5:
-                obv_slope = np.polyfit(range(5), data["OBV"].tail(5), 1)[0]
-            else:
-                obv_slope = 0
-
             latest = data.iloc[-1]
+
+            # obv slope: son 3 günlük OBV değişiminin ortalaması -> hızlı hacim yönü göstergesi
+            obv_slope = None
+            try:
+                obv_recent = data["OBV"].dropna().values
+                if len(obv_recent) >= 3:
+                    obv_slope = float(np.mean(np.diff(obv_recent[-3:])))
+                else:
+                    obv_slope = float(np.diff(obv_recent).mean()) if len(obv_recent) >= 2 else 0.0
+            except Exception:
+                obv_slope = 0.0
+
             trend_info = {
                 "timestamp": now,
-                "rsi": float(latest["RSI"]),
-                "ema10": float(latest["EMA10"]),
-                "ema20": float(latest["EMA20"]),
-                "macd": float(latest["MACD"]),
-                "obv": float(latest["OBV"]),
-                "obv_slope": float(obv_slope),
+                "rsi": float(latest.get("RSI", np.nan)),
+                "ema10": float(latest.get("EMA10", np.nan)),
+                "ema20": float(latest.get("EMA20", np.nan)),
+                "macd": float(latest.get("MACD", np.nan)),
+                "obv": float(latest.get("OBV", 0.0)),
+                "obv_slope": obv_slope,
+                # gerekirse ilave seri veya değerler eklenebilir
             }
             trend_cache[symbol] = trend_info
             return trend_info
@@ -367,75 +377,72 @@ def create_price_checker(monitored_dict):
             print(f"⚠️ {symbol} trend datası alınamadı:", e)
             return None
 
-    def analyze_trend(symbol, price, base, rsi, fibo_crossed, momentum, obv_slope=None, prev_data=None):
+    def analyze_trend_with_strength(rsi, ema10, ema20, obv_slope, recent_prices=None):
         """
-        Daha istikrarlı trend belirleme fonksiyonu.
-        RSI, EMA farkı, hacim (OBV), ve son 3 mum yönünü birlikte değerlendirir.
+        Daha dengeli trend belirleme ve 'trend güç' puanı döner.
+        Döndürülen: (trend_label, advice_pair, trend_strength_int)
         """
-        try:
-            prices = base.get("recent_prices", [])
-            ema10 = base.get("ema10_series", [])
-            ema20 = base.get("ema20_series", [])
-            rsi_values = base.get("rsi_series", [])
-        except Exception:
-            prices, ema10, ema20, rsi_values = [], [], [], []
+        # defaultlar
+        trend_label = "⏸ Kararsız"
+        advice_pair = {
+            "own": "Veri yetersiz. Hacim ve fiyatı izlemeye devam et.",
+            "no_own": "Veri yetersiz. Giriş için teyit bekle."
+        }
+        # basit göstergeler
+        ema_diff = ema10 - ema20
+        # momentum consistency (opsiyonel): son 4 kapanış yönü
+        consistency = 0
+        if recent_prices is not None and len(recent_prices) >= 4:
+            seq = np.sign(np.diff(recent_prices[-4:])).tolist()
+            consistency = sum(seq)  # +3..-3
 
-        if len(prices) >= 4 and len(ema10) > 0 and len(ema20) > 0:
-            ema_diff = ema10[-1] - ema20[-1]
-            rsi_last = rsi_values[-1] if len(rsi_values) > 0 else rsi
+        # trend strength skoru (0-10)
+        strength = 5
+        if ema_diff > 0:
+            strength += 2
+        if ema_diff > (0.01 * (recent_prices[-1] if recent_prices else 1)):  # anlamlı pozitif fark
+            strength += 1
+        if rsi is not None and rsi > 60:
+            strength += 1
+        if obv_slope is not None and obv_slope > 0:
+            strength += 1
+        if consistency >= 2:
+            strength += 1
+        strength = max(0, min(10, int(strength)))
 
-            if rsi_last > 60:
-                rsi_signal = "yukarı"
-            elif rsi_last < 40:
-                rsi_signal = "aşağı"
-            else:
-                rsi_signal = "nötr"
-
-            momentum_seq = np.sign(np.diff(prices[-4:])).tolist()
-            consistency = sum(momentum_seq)
-
-            prev_trend = None
-            if prev_data and symbol in prev_data:
-                prev_trend = prev_data[symbol].get("trend")
-
-            if consistency >= 2 and ema_diff > 0 and rsi_signal == "yukarı":
-                trend_label = "📈 Güçlü yükseliş"
-            elif consistency <= -2 and ema_diff < 0 and rsi_signal == "aşağı":
-                trend_label = "📉 Güçlü düşüş"
-            elif prev_trend in ["📈 Güçlü yükseliş", "📉 Güçlü düşüş"]:
-                trend_label = prev_trend
-            elif rsi_signal == "nötr":
-                trend_label = "⏸ Kararsız"
-            else:
-                trend_label = "⚠️ Zayıflayan trend"
-        else:
+        # karar (daha yumuşak eşikler)
+        if ( (consistency >= 2 and ema_diff > 0) or (ema_diff > 0 and obv_slope > 0 and rsi and rsi > 52) or (strength >= 7 and ema_diff > 0) ):
+            trend_label = "📈 Yükseliş (güç: {}/10)".format(strength)
+            advice_pair = {
+                "own": "Trend olumlu. Pozisyonu koru; kademeli alım için geri çekilmeleri %2-%4 aralığında düşünebilirsin.",
+                "no_own": "Momentum pozitif. Hacim teyit ediyorsa küçük miktarda giriş düşünülebilir."
+            }
+        elif ( (consistency <= -2 and ema_diff < 0) or (ema_diff < 0 and obv_slope < 0 and rsi and rsi < 48) or (strength <= 3 and ema_diff < 0) ):
+            trend_label = "📉 Düşüş (güç: {}/10)".format(strength)
+            advice_pair = {
+                "own": "Trend aşağı yönlü. Elindeyse stop-loss'u sıkılaştır veya pozisyonu azalt.",
+                "no_own": "Düşüş baskısı var; yeni giriş için dip ve hacim toparlanmasını bekle."
+            }
+        elif abs(ema_diff) < 0.5 and abs(obv_slope) < 1 and abs((recent_prices[-1] if recent_prices else 0) - (recent_prices[0] if recent_prices else 0)) / (recent_prices[0] if recent_prices else 1) * 100 < 1.5:
             trend_label = "⏸ Kararsız"
-
-        # --- Tavsiyeler (dict olarak döner) ---
-        if "yükseliş" in trend_label:
-            advice_pair = {
-                "own": "Trend güçleniyor. Elindeyse pozisyonu koru, yeni giriş için küçük düzeltmeleri bekle.",
-                "no_own": "Momentum olumlu, ancak RSI aşırıya kaçarsa kâr alımı düşünülebilir."
-            }
-        elif "düşüş" in trend_label:
-            advice_pair = {
-                "own": "Trend düşüşte. Elindeyse stop koy, yoksa yeni pozisyon için dip dönüş sinyali bekle.",
-                "no_own": "RSI düşük bölgede. Hacim toparlanırsa tepki alımı gelebilir."
-            }
-        elif "zayıflayan" in trend_label:
-            advice_pair = {
-                "own": "Momentum ve hacim zayıflıyor, kârı korumak için stop belirle.",
-                "no_own": "Trend kararsız. RSI 40–60 aralığında, yön teyidi beklenmeli."
-            }
-        else:
             advice_pair = {
                 "own": "Piyasa kararsız. Yeni işlem açmadan önce hacim desteğini bekle.",
-                "no_own": "Henüz net sinyal yok. RSI ve hacim yön değişimini gösterebilir."
+                "no_own": "Henüz net sinyal yok. RSI ve hacim yön değişimini bekle."
+            }
+        else:
+            trend_label = "⚠️ Zayıflayan trend (güç: {}/10)".format(strength)
+            advice_pair = {
+                "own": "Momentum belirsiz; kârı korumak için stop belirle. Yeni alım yapma.",
+                "no_own": "Trend kararsız. Fibo 38.2–61.8 aralığına geri dönüşü bekle."
             }
 
-        return trend_label, advice_pair
+        return trend_label, advice_pair, strength
 
     def check_prices():
+        STOP_LOSS_STATIC_PCT = 0.03  # her hisse için %3 statik stop-loss
+        STOP_LOSS_RESET_PCT = 0.05   # %5 toparlanma sonrası stop tekrar aktifleşir
+        STOP_LOSS_MARGIN = 0.01      # fibo destek altı marj (%1)
+
         tz = pytz.timezone(MARKET_TZ)
         now = datetime.now(tz)
         print(f"\n[{now.strftime('%Y-%m-%d %H:%M:%S %Z')}] Fiyat kontrolü başlıyor...")
@@ -455,87 +462,113 @@ def create_price_checker(monitored_dict):
                 print(f"  {sym}: baseline yok, atlandı.")
                 continue
 
-            # --- Trend verisini getir ---
+            meta.setdefault("fibo_alerts", {})
+            meta.setdefault("alerts", {"balanced": False, "rsi": False})
+            meta.setdefault("last_trend", None)
+            meta.setdefault("last_price", baseline)
+            meta.setdefault("stop_triggered", False)
+
+            pct_from_baseline = (latest - baseline) / baseline * 100.0
+
             trend_data = get_trend_data(sym)
             if not trend_data:
+                print(f"  {sym}: trend verisi yok.")
                 continue
-            rsi = trend_data["rsi"]
-            momentum = trend_data["ema10"] - trend_data["ema20"]
-            obv_slope = trend_data["obv_slope"]
+            rsi = trend_data.get("rsi")
+            ema10 = trend_data.get("ema10")
+            ema20 = trend_data.get("ema20")
+            obv_slope = trend_data.get("obv_slope", 0.0)
 
-            # --- Fibonacci seviyeleri ve tavsiyeleri ---
+            # --- küçük momentum kontrolü ---
+            recent_prices = None
+            try:
+                t = yf.Ticker(f"{sym}.IS")
+                hist = t.history(period="7d", interval="1d")
+                if hist is not None and not hist.empty:
+                    recent_prices = hist["Close"].dropna().tolist()
+            except Exception:
+                recent_prices = None
+
+            # --- Fibonacci seviyeleri ---
             recent_low = baseline * 0.9
             recent_high = baseline * 1.1
-            diff = recent_high - recent_low
+            diff = (recent_high - recent_low) if (recent_high - recent_low) != 0 else 1.0
             fibo_levels = {
                 23.6: recent_high - 0.236 * diff,
                 38.2: recent_high - 0.382 * diff,
                 50.0: recent_high - 0.500 * diff,
                 61.8: recent_high - 0.618 * diff,
+                78.6: recent_high - 0.786 * diff,
             }
 
-            if "fibo_alerts" not in meta:
-                meta["fibo_alerts"] = {}
+            # --- Stop-Loss hesaplama ---
+            static_stop = baseline * (1 - STOP_LOSS_STATIC_PCT)
+            dynamic_stop = static_stop
 
+            # fiyat son fibo desteğinin altına sarkarsa onu referans al
+            for lvl, fib_price in sorted(fibo_levels.items(), reverse=True):
+                if latest > fib_price:
+                    dynamic_stop = fib_price * (1 - STOP_LOSS_MARGIN)
+                    break
+
+            stop_loss_price = min(static_stop, dynamic_stop)
+
+            # stop-loss tetikleme kontrolü
+            if not meta["stop_triggered"] and latest <= stop_loss_price:
+                send_telegram_message(
+                    f"🛑 {sym} STOP-LOSS Tetiklendi!\n"
+                    f"Fiyat: {latest:.2f} ₺ ≤ Stop Seviyesi: {stop_loss_price:.2f} ₺\n"
+                    f"💡 Tavsiye: Zararı büyütmemek için pozisyonu gözden geçir. Ana destek kırıldıysa çıkış değerlendir."
+                )
+                meta["stop_triggered"] = True
+
+            # fiyat toparlanırsa stop resetlenir
+            elif meta["stop_triggered"] and latest >= stop_loss_price * (1 + STOP_LOSS_RESET_PCT):
+                meta["stop_triggered"] = False
+                send_telegram_message(f"✅ {sym} fiyat toparlandı, stop-loss yeniden aktif hale getirildi ({latest:.2f} ₺)")
+
+            # --- Fibonacci geçişleri ---
             fibo_crossed = []
-            fibo_message = ""
-            fibo_triggered = False
-
+            fibo_msgs = []
             for lvl, price_level in fibo_levels.items():
-                if not meta["fibo_alerts"].get(str(lvl), False) and latest >= price_level:
-                    meta["fibo_alerts"][str(lvl)] = True
+                key = f"fibo_{lvl}"
+                if not meta["fibo_alerts"].get(key, False) and latest >= price_level:
+                    meta["fibo_alerts"][key] = True
                     fibo_crossed.append(lvl)
-                    fibo_triggered = True
-
-                    # --- Fibo tavsiyesi mesajı ---
+                    # uygun tavsiyeler
                     if lvl == 23.6:
-                        advice_msg = "Trend yeni başlıyor olabilir. Küçük miktarda alım yapılabilir, hacim artışıyla teyit beklenmeli."
+                        adv = "Trend yeni başlıyor olabilir. Küçük miktarda alım düşünülebilir; hacimle teyit bekle."
                     elif lvl == 38.2:
-                        advice_msg = "Trend güçleniyor. Pozisyon korunabilir, ancak RSI yüksekse kârın bir kısmı alınabilir."
+                        adv = "Güçlenme sinyali. OBV yükseliyorsa pozisyon korunabilir; RSI yüksekse kâr al."
                     elif lvl == 50.0:
-                        advice_msg = "Kısa vadeli güçlü momentum bölgesi. Fiyat burada tutunursa pozisyon artırılabilir."
+                        adv = "Kısa vadeli momentum bölgesi. Tutunursa pozisyon artırılabilir."
                     elif lvl == 61.8:
-                        advice_msg = "Ana direnç bölgesi. Kırarsa güçlü ralli başlayabilir, kırmazsa kâr alımı veya stop yapılabilir."
+                        adv = "Ana direnç. RSI orta seviyedeyse güçlü kırılma beklenir; RSI yüksekse kâr almayı düşün."
                     elif lvl == 78.6:
-                        advice_msg = "Yüksek direnç. Artık düzeltme riski yüksek, kâr realizasyonu yapılabilir."
-                    elif lvl == 100.0:
-                        advice_msg = "Fiyat tepe seviyede. Yeni alım riskli, kâr alınabilir."
-                    else:
-                        advice_msg = "Fiyat önemli teknik seviyede. Hacmi izle."
-
-                    fibo_message += (
+                        adv = "Yüksek direnç; düzeltme riski yükselir. Hacim düşükse çıkış düşün."
+                    fibo_msgs.append(
                         f"\n\n📊 {sym} {lvl:.1f}% Fibonacci seviyesini geçti!"
                         f"\nSeviye: {price_level:.2f} ₺ | Güncel: {latest:.2f} ₺"
-                        f"\n💡 Tavsiye: {advice_msg}"
+                        f"\n💡 Tavsiye: {adv}"
                     )
 
             # --- Trend analizi ---
-            trend_label, advice_pair = analyze_trend(sym, latest, baseline, rsi, fibo_crossed, momentum, obv_slope)
+            trend_label, advice_pair, trend_strength = analyze_trend_with_strength(
+                rsi=rsi, ema10=ema10, ema20=ema20, obv_slope=obv_slope, recent_prices=recent_prices
+            )
 
-            # --- Bildirim koşulları ---
-            if "last_trend" not in meta:
-                meta["last_trend"] = None
-            if "last_price" not in meta:
-                meta["last_price"] = baseline
-
-            trend_changed = (trend_label != meta["last_trend"])
-            price_change_since_last = abs((latest - meta["last_price"]) / meta["last_price"] * 100)
+            last_trend = meta.get("last_trend")
+            last_price = meta.get("last_price", baseline)
+            trend_changed = (trend_label != last_trend)
+            try:
+                price_change_since_last = abs((latest - last_price) / (last_price if last_price else baseline) * 100.0)
+            except Exception:
+                price_change_since_last = 0.0
             big_move = price_change_since_last >= 3.0
-            should_send = fibo_triggered or trend_changed or big_move
 
-            if should_send:
-                send_telegram_message(
-                    f"📊 {sym} Güncellemesi\n"
-                    f"💰 Fiyat: {latest:.2f} ₺  ({(latest - baseline) / baseline * 100:+.2f}% başlangıca göre)\n"
-                    f"📈 Trend: {trend_label}\n"
-                    f"💬 Eğer elinde VARSA: {advice_pair['own']}\n"
-                    f"💬 Eğer elinde YOKSA: {advice_pair['no_own']}"
-                    f"{fibo_message}"  # 💥 Fibonacci tavsiyeleri mesajda
-                )
-                meta["last_trend"] = trend_label
-                meta["last_price"] = latest
+            should_send = bool(fibo_crossed) or trend_changed or big_move
 
-            # Hedef fiyat uyarısı (hiç değişmedi)
+            # --- hedef fiyat alarmları ---
             for mkey, tkey, label in [
                 ("balanced", "target_price_balanced", "Balanced"),
                 ("rsi", "target_price_rsi", "RSI"),
@@ -544,15 +577,36 @@ def create_price_checker(monitored_dict):
                 if tp is not None and not meta["alerts"].get(mkey, False) and latest >= tp:
                     send_telegram_message(
                         f"🚨 {sym} {label} hedefe ulaştı!\n"
-                        f"Şu an: {latest:.2f} ₺ \n başlangıç: {baseline:.2f}\n"
-                        f"Hedef: {tp:.2f} ₺"
+                        f"Şu an: {latest:.2f} ₺ \nHedef: {tp:.2f} ₺"
                     )
                     meta["alerts"][mkey] = True
 
-            print(f"  {sym}: trend={trend_label}, fiyat={latest:.2f} ₺")
+            if should_send:
+                parts = [
+                    f"📊 {sym} Güncellemesi",
+                    f"💰 Fiyat: {latest:.2f} ₺  ({pct_from_baseline:+.2f}% başlangıca göre)",
+                    f"📈 Trend: {trend_label}",
+                    f"💬 Eğer elinde VARSA: {advice_pair['own']}",
+                    f"💬 Eğer elinde YOKSA: {advice_pair['no_own']}",
+                ]
+                if fibo_msgs:
+                    parts.extend(fibo_msgs)
+                if big_move:
+                    parts.append(f"\n⚡ Büyük hareket: Son gönderime göre %{price_change_since_last:.2f} değişim.")
+                parts.append(f"\n🔎 RSI:{rsi:.1f if rsi is not None else 'NA'} | EMA10-20 diff:{(ema10-ema20):.4f} | OBV_slope:{obv_slope:.2f} | Güç:{trend_strength}/10")
+                parts.append(f"🧯 Stop-Loss: {stop_loss_price:.2f} ₺ (aktif)" if not meta["stop_triggered"] else f"🛑 Stop-Loss: {stop_loss_price:.2f} ₺ (tetiklendi)")
+                msg = "\n".join(parts)
+                send_telegram_message(msg)
+
+                meta["last_trend"] = trend_label
+                meta["last_price"] = latest
+
+            print(f"  {sym}: trend={trend_label}, fiyat={latest:.2f} ₺, stop={stop_loss_price:.2f}, fibo_crossed={fibo_crossed}")
 
         print("✅ Kontrol tamamlandı.")
+
     return check_prices
+
 
 
 # -----------------------------

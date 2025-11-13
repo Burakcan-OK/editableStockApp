@@ -586,10 +586,10 @@ def create_price_checker(monitored_dict):
                     parts.extend(fibo_msgs)
                 if big_move:
                     parts.append(f"\n⚡ Büyük hareket: Son gönderime göre %{price_change_since_last:.2f} değişim.")
-                parts.append(f"\n🔎 RSI:{rsi:.1f if rsi is not None else 'NA'} | EMA10-20 diff:{(ema10-ema20):.4f} | OBV_slope:{obv_slope:.2f} | Güç:{trend_strength}/10")
-                parts.append(f"🧯 Stop-Loss: {stop_loss_price:.2f} ₺ (aktif)" if not meta["stop_triggered"] else f"🛑 Stop-Loss: {stop_loss_price:.2f} ₺ (tetiklendi)")
-                msg = "\n".join(parts)
-                send_telegram_message(msg)
+                    parts.append(f"\n🔎 RSI:{rsi:.1f if rsi is not None else 'NA'} | EMA10-20 diff:{(ema10-ema20):.4f} | OBV_slope:{obv_slope:.2f} | Güç:{trend_strength}/10")
+                    parts.append(f"🧯 Stop-Loss: {stop_loss_price:.2f} ₺ (aktif)" if not meta["stop_triggered"] else f"🛑 Stop-Loss: {stop_loss_price:.2f} ₺ (tetiklendi)")
+                    msg = "\n".join(parts)
+                    send_telegram_message(msg)
 
                 meta["last_trend"] = trend_label
                 meta["last_price"] = latest
